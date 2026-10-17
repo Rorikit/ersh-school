@@ -2,7 +2,7 @@ import { StudentSchema, type Student } from "../shared/model.ts";
 import { DomainError } from "./domain.ts";
 export function csvCell(value: unknown) {
   let s = String(value ?? "");
-  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  if (/^(?:\s|[=+\-@])/.test(s)) s = "'" + s;
   return '"' + s.replaceAll('"', '""') + '"';
 }
 export function csvExport(rows: unknown[][]) {

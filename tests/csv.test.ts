@@ -12,6 +12,7 @@ test("CSV: кавычки, формулы, предварительная про
   );
   assert.equal(parsed[0].name, "Тест; Имя");
   assert.match(csvExport([["=1+1", "+1", "@cmd", "-3"]]), /"'=1\+1"/);
+  assert.match(csvExport([["  =1+1"]]), /"'  =1\+1"/);
   assert.throws(
     () => importStudents("name;birthDate;contact\nName;bad;", "s", "b", "p"),
     /Строка 2/,
