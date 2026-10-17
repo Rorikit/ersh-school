@@ -4,25 +4,34 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0",
-    "build": "tsc -b && vite build",
-    "typecheck": "tsc --noEmit",
-    "test": "node scenarios.mjs"
+    "dev": "node scripts/dev.mjs",
+    "start": "node server/index.ts",
+    "start:demo": "node server/index.ts --demo",
+    "build": "npm run typecheck && vite build",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json",
+    "test": "node --test tests/domain.test.ts tests/api.test.ts tests/backup.test.ts tests/csv.test.ts",
+    "test:e2e": "playwright test",
+    "db:backup": "node scripts/backup.ts",
+    "db:user": "node scripts/user.ts",
+    "db:restore": "node scripts/backup.ts",
+    "benchmark": "node scripts/benchmark.ts"
   },
   "dependencies": {
+    "@fontsource-variable/inter": "^5.3.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "html-react-parser": "^5.2.0"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
-    "typescript": "~5.8.3",
-    "vite": "^6.3.5",
+    "@axe-core/playwright": "^4.14.0",
+    "@playwright/test": "^1.51.1",
+    "@types/node": "^24.19.2",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
-    "tailwindcss": "^3.4.17",
-    "postcss": "^8.5.3",
-    "autoprefixer": "^10.4.21",
-    "cheerio": "^1.0.0",
-    "@playwright/test": "^1.51.1"
+    "typescript": "~5.8.3",
+    "vite": "^6.3.5"
+  },
+  "engines": {
+    "node": ">=24.16.0"
   }
 }

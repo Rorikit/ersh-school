@@ -1,0 +1,14 @@
+{
+  "environment": {
+    "node": "v24.16.0",
+    "platform": "win32"
+  },
+  "students": 10000,
+  "lessons": 100000,
+  "bytes": 39043334,
+  "serializeMs": 117,
+  "readValidateMs": 629,
+  "metricsMs": 2,
+  "dailyTotal": 5,
+  "scope": "Только синтетический серверный агрегат в памяти, без браузера, сети, SLA и реальной базы"
+}

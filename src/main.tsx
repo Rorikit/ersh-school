@@ -1,852 +1,838 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import parse, {
-  domToReact,
-  Element,
-  type HTMLReactParserOptions,
-} from "html-react-parser";
-import template from "./template.html?raw";
-import {
-  repository,
-  initial,
-  notifications,
-  dailySummary,
-  type Lesson,
-  type Store,
-} from "./data";
+import "@fontsource-variable/inter";
 import "./style.css";
-import { LessonCard, Toast } from "./components";
-const icon = (s: string) => (
-  <span className="material-symbols-outlined" aria-hidden="true">
-    {s}
-  </span>
-);
-const titles: Record<string, string> = {
-  lesson: "Добавить занятие",
-  payment: "Принять оплату",
-  student: "Записать ученика",
-  group: "Создать группу",
-  move: "Перенести занятие",
-  cancel: "Отменить занятие",
-  attendance: "Посещаемость",
-  conflict: "Разрешить конфликт",
-  draft: "Напоминание / Счёт",
-  substitute: "Назначить замену",
-  details: "Данные занятия",
-  help: "Помощь и связь",
-  profile: "Профиль администратора",
-};
+import { api, ApiError, request } from "./api";
+import {
+  today,
+  addDays,
+  notifications,
+  metrics,
+  roleNames,
+  type State,
+  type Session,
+  type Command,
+} from "../shared/model";
+import { allowed } from "../shared/permissions";
+import {
+  Button,
+  Icon,
+  Modal,
+  Drawer,
+  Empty,
+  type FormSpec,
+} from "./components";
+import { createActions } from "./actions";
+import {
+  Dashboard,
+  Schedule,
+  Registry,
+  LessonRegistry,
+  Finance,
+  Analytics,
+  Settings,
+  Profile,
+  LessonDetails,
+  type Workspace,
+} from "./screens";
+const routes = [
+  ["/dashboard", "Главная", "home"],
+  ["/schedule", "Расписание", "calendar"],
+  ["/lessons", "Занятия", "book"],
+  ["/students", "Ученики", "people"],
+  ["/groups", "Группы", "people"],
+  ["/teachers", "Преподаватели", "user"],
+  ["/finance", "Финансы", "money"],
+  ["/analytics", "Статистика", "chart"],
+  ["/settings", "Настройки", "settings"],
+];
 function App() {
-  const [data, setData] = useState(repository.load),
-    [page, setPage] = useState(location.pathname),
-    [filter, setFilter] = useState("Все"),
-    [day, setDay] = useState("2024-10-18"),
-    [query, setQuery] = useState(""),
-    [record, setRecord] = useState(""),
-    [pop, setPop] = useState(""),
-    [mobile, setMobile] = useState(false),
-    [modal, setModal] = useState(""),
-    [selected, setSelected] = useState<Lesson | null>(null),
-    [toast, setToast] = useState(""),
+  const [session, setSession] = useState<Session | null>(null),
+    [data, setData] = useState<State | null>(null),
+    [loading, setLoading] = useState(true),
     [error, setError] = useState(""),
-    [saving, setSaving] = useState(false),
-    [dirty, setDirty] = useState(false),
-    [discard, setDiscard] = useState(false);
-  const dialog = useRef<HTMLDialogElement>(null),
-    form = useRef<HTMLFormElement>(null),
-    previousFocus = useRef<HTMLElement | null>(null);
-  const unsaved = useRef<Record<string, FormDataEntryValue>>({});
-  function notify(s: string) {
-    setToast(s);
-    setTimeout(() => setToast(""), 4000);
+    [demo, setDemo] = useState(false),
+    [path, setPath] = useState(location.pathname),
+    [date, setDate] = useState(today()),
+    [spec, setSpec] = useState<FormSpec | null>(null),
+    [toast, setToast] = useState(""),
+    [query, setQuery] = useState(""),
+    [menu, setMenu] = useState(""),
+    [mobile, setMobile] = useState(false),
+    [branch, setBranch] = useState("");
+  const latest = useRef<State | null>(null),
+    timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  latest.current = data;
+  function notify(message: string) {
+    setToast(message);
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setToast(""), 6000);
   }
-  function commit(update: (d: Store) => void, message: string) {
-    const next = structuredClone(data);
-    update(next);
-    next.activities.unshift(message);
+  async function refresh() {
     try {
-      repository.save(next);
-      setData(next);
-      notify(message);
-      return true;
-    } catch {
-      setError(
-        "Не удалось сохранить данные. Проверьте доступность локального хранилища.",
-      );
-      return false;
-    }
-  }
-  function open(kind: string, l: Lesson | null = null) {
-    previousFocus.current = document.activeElement as HTMLElement;
-    unsaved.current = {};
-    setSelected(l);
-    setModal(kind);
-    setError("");
-    setDirty(false);
-    setDiscard(false);
-    setPop("");
-  }
-  function close() {
-    if (dirty) {
-      if (form.current)
-        unsaved.current = Object.fromEntries(new FormData(form.current));
-      setDiscard(true);
-      return;
-    }
-    finish();
-  }
-  useEffect(() => {
-    if (!discard && form.current) {
-      for (const [name, value] of Object.entries(unsaved.current)) {
-        const element = form.current.elements.namedItem(name);
-        if (
-          element instanceof HTMLInputElement ||
-          element instanceof HTMLSelectElement ||
-          element instanceof HTMLTextAreaElement
-        )
-          element.value = String(value);
+      const s = await api.state();
+      setData(s);
+      latest.current = s;
+      setError("");
+      return s;
+    } catch (e) {
+      const err = e as ApiError;
+      setError(err.message + (err.requestId ? " · " + err.requestId : ""));
+      if (err.status === 401) {
+        setSession(null);
+        setData(null);
       }
+      throw e;
     }
-  }, [discard]);
-  function finish() {
-    setModal("");
-    setDirty(false);
-    setDiscard(false);
-    dialog.current?.close();
-    const target = previousFocus.current;
-    requestAnimationFrame(() => {
-      if (target?.isConnected) target.focus();
-      else document.querySelector<HTMLElement>("header input")?.focus();
-    });
+  }
+  async function boot() {
+    setLoading(true);
+    setError("");
+    try {
+      const health = await request<{ demo: boolean }>("/health");
+      setDemo(health.demo);
+      const session = await api.session();
+      setSession(session);
+      const s = await refresh();
+      setDate(today(s.school.timezone));
+    } catch (e) {
+      if ((e as ApiError).status !== 401) setError((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
   }
   useEffect(() => {
-    if (modal) {
-      dialog.current?.showModal();
-      dialog.current
-        ?.querySelector<HTMLElement>("input,select,textarea,button")
-        ?.focus();
-    }
-  }, [modal]);
+    void boot();
+    const nav = () => {
+      setPath(location.pathname);
+      setQuery("");
+      setMenu("");
+      setMobile(false);
+      requestAnimationFrame(() =>
+        document.querySelector<HTMLElement>("main h1")?.focus(),
+      );
+    };
+    window.addEventListener("popstate", nav);
+    return () => window.removeEventListener("popstate", nav);
+  }, []);
   useEffect(() => {
-    const fn = (e: KeyboardEvent) => {
+    if (!session) return;
+    const interval = setInterval(() => {
+      if (!spec) void refresh().catch(() => {});
+    }, 30000);
+    const key = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        setPop("");
         setQuery("");
+        setMenu("");
+        setMobile(false);
       }
       if ((e.ctrlKey || e.metaKey) && e.key === "k") {
         e.preventDefault();
-        document.querySelector<HTMLInputElement>("header input")?.focus();
+        document.getElementById("global-search")?.focus();
       }
     };
-    window.addEventListener("keydown", fn);
-    const nav = () => setPage(location.pathname);
-    window.addEventListener("popstate", nav);
+    window.addEventListener("keydown", key);
     return () => {
-      window.removeEventListener("keydown", fn);
-      window.removeEventListener("popstate", nav);
+      clearInterval(interval);
+      window.removeEventListener("keydown", key);
     };
-  }, []);
-  function navigate(path: string) {
-    history.pushState({}, "", path);
-    setPage(path);
+  }, [session, spec]);
+  function navigate(url: string) {
+    history.pushState({}, "", url);
+    setPath(location.pathname);
+    setQuery("");
     setMobile(false);
-  }
-  function action(text: string, l: Lesson | null = null) {
-    if (text.includes("Отметить") || text.includes("Внести явку"))
-      open("attendance", l || data.lessons[2]);
-    else if (/Журнал|Открыть|Детали/.test(text)) open("details", l);
-    else if (/Добавить занятие|Новое занятие/.test(text)) open("lesson");
-    else if (text.includes("Принять оплату")) open("payment");
-    else if (text.includes("Записать")) open("student");
-    else if (text.includes("Создать группу")) open("group");
-    else if (text.includes("Разрешить")) open("conflict");
-    else if (text.includes("Напомнить")) open("draft");
-    else if (text.includes("Назначить")) open("substitute");
-    else if (text.includes("Помощь")) open("help");
-    else if (text.includes("Создать")) setPop(pop === "create" ? "" : "create");
-    else if (text.includes("Вчера")) setDay("2024-10-17");
-    else if (text.includes("Завтра")) setDay("2024-10-19");
-    else if (
-      /Все \(|Идут сейчас|Предстоящие|Завершенные|Требуют отметки/.test(text)
-    )
-      setFilter(text.split(" (")[0]);
-  }
-  function textOf(e: Element): string {
-    return e.children
-      .map((c) =>
-        c.type === "text" ? c.data : c instanceof Element ? textOf(c) : "",
-      )
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim();
-  }
-  const options = (lesson: Lesson | null = null): HTMLReactParserOptions => ({
-    replace(node) {
-      if (!(node instanceof Element)) return;
-      if (
-        node.name === "span" &&
-        node.attribs.class?.includes("material-symbols-outlined")
-      )
-        return (
-          <span className={node.attribs.class} aria-hidden="true">
-            {textOf(node)}
-          </span>
-        );
-      if (node.attribs["data-summary"]) {
-        const [index, field] = node.attribs["data-summary"].split(":");
-        const metric = dailySummary[Number(index)];
-        const value = metric[field as keyof typeof metric];
-        return node.name === "p" ? (
-          <p className={node.attribs.class}>{value}</p>
-        ) : (
-          <span className={node.attribs.class}>{value}</span>
-        );
-      }
-      if (node.attribs["data-component"] === "lessons") {
-        const visible = data.lessons.filter(
-          (l) =>
-            l.date === day &&
-            (filter === "Все" ||
-              (filter === "Идут сейчас" && l.status === "live") ||
-              (filter === "Предстоящие" && l.status === "planned") ||
-              (filter === "Завершенные" && l.status === "completed") ||
-              (filter === "Требуют отметки" &&
-                !l.marked &&
-                l.status === "completed")),
-        );
-        return (
-          <div
-            data-component="lesson-list"
-            className="flex flex-col gap-space-sm"
-          >
-            {visible.length ? (
-              visible.map((l) => (
-                <LessonCard key={l.id} lesson={l} onOpen={open} />
-              ))
-            ) : (
-              <div className="empty">Занятий по выбранным условиям нет</div>
-            )}
-          </div>
-        );
-      }
-      if (
-        node.name === "div" &&
-        node.attribs.class === "flex flex-col gap-2 pt-2 border-t-0"
-      )
-        return (
-          <div className={node.attribs.class}>
-            {data.activities.length > 0 && (
-              <div className="inline-feed">
-                <b>Последние действия</b>
-                {data.activities.slice(0, 4).map((s, i) => (
-                  <p key={i}>{s}</p>
-                ))}
-              </div>
-            )}
-            {domToReact(node.children as never, options())}
-          </div>
-        );
-      if (node.name === "main" && page !== "/" && page !== "/dashboard") {
-        const a = Array.from(document.querySelectorAll("nav a")).find(
-          (a) => a.getAttribute("href") === page,
-        );
-        return (
-          <main className="placeholder">
-            <h1>{a?.textContent || "Раздел"}</h1>
-            <p>Макет раздела не предоставлен</p>
-            <button className="primary" onClick={() => navigate("/")}>
-              Вернуться на главную
-            </button>
-          </main>
-        );
-      }
-      if (node.name === "a") {
-        return (
-          <a
-            href={node.attribs.href}
-            className={node.attribs.class}
-            aria-current={page === node.attribs.href ? "page" : undefined}
-            onClick={(e) => {
-              e.preventDefault();
-              navigate(node.attribs.href);
-            }}
-          >
-            {domToReact(node.children as never, options())}
-          </a>
-        );
-      }
-      if (node.name === "input")
-        return (
-          <div className="search-wrap">
-            {icon("search")}
-            <input
-              aria-label="Поиск ученика, группы или преподавателя"
-              className={node.attribs.class}
-              placeholder={node.attribs.placeholder}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
-            {query && (
-              <div className="search-results">
-                {[
-                  ...data.students,
-                  ...data.groups,
-                  ...new Set(data.lessons.map((l) => l.teacher)),
-                ]
-                  .filter((s) => s.toLowerCase().includes(query.toLowerCase()))
-                  .slice(0, 8)
-                  .map((s) => (
-                    <button
-                      key={s}
-                      onClick={() => {
-                        setRecord(s);
-                        open(
-                          "details",
-                          data.lessons.find(
-                            (l) => l.title === s || l.teacher === s,
-                          ) || null,
-                        );
-                        setQuery("");
-                      }}
-                    >
-                      {s}
-                    </button>
-                  ))}
-                {![
-                  ...data.students,
-                  ...data.groups,
-                  ...data.lessons.map((l) => l.teacher),
-                ].some((s) =>
-                  s.toLowerCase().includes(query.toLowerCase()),
-                ) && <p>Ничего не найдено</p>}
-              </div>
-            )}
-          </div>
-        );
-      if (
-        node.name === "span" &&
-        node.attribs.class?.includes("font-body-sm") &&
-        textOf(node).startsWith("Ауд. 204 в 17:15") &&
-        data.incidents?.conflict
-      ) {
-        const c = data.incidents.conflict;
-        return (
-          <span className={node.attribs.class}>
-            Авиамоделирование: ауд. {c.room}, {c.start}–{c.end} • конфликт
-            устранён
-          </span>
-        );
-      }
-      if (
-        node.name === "span" &&
-        textOf(node).startsWith("Биология 10 кл.") &&
-        data.incidents?.substitute
-      )
-        return (
-          <span className={node.attribs.class}>
-            Биология 10 кл. • {data.incidents.substitute.teacher}
-          </span>
-        );
-      if (
-        node.name === "span" &&
-        textOf(node) === "Не выставлена посещаемость" &&
-        data.resolved.includes("attendance")
-      )
-        return (
-          <span className={node.attribs.class}>Посещаемость сохранена</span>
-        );
-      if (node.name === "button") {
-        const text = textOf(node);
-        const notification = text.includes("notifications");
-        const isFilter =
-          /Все \(|Идут сейчас|Предстоящие|Завершенные|Требуют отметки/.test(
-            text,
-          );
-        return (
-          <button
-            type="button"
-            className={
-              node.attribs.class +
-              (isFilter
-                ? " filter " + (text.includes(filter + " (") ? "chosen" : "")
-                : "")
-            }
-            aria-label={
-              notification
-                ? "Уведомления"
-                : text.replace(/\b[a-z_]+\b/g, "").trim()
-            }
-            onClick={() =>
-              notification
-                ? setPop(pop === "notifications" ? "" : "notifications")
-                : action(text, lesson)
-            }
-          >
-            {domToReact(node.children as never, options(lesson))}
-          </button>
-        );
-      }
-      if (node.name === "div" && node.attribs.class?.includes("cursor-pointer"))
-        return (
-          <button
-            className="profile"
-            onClick={() => setPop(pop === "profile" ? "" : "profile")}
-          >
-            {domToReact(node.children as never, options())}
-          </button>
-        );
-      if (node.name === "div" && textOf(node) === "Сегодня, 18 окт")
-        return (
-          <button className="today" onClick={() => setDay("2024-10-18")}>
-            {day === "2024-10-18"
-              ? "Сегодня, 18 окт"
-              : day === "2024-10-17"
-                ? "17 октября"
-                : "19 октября"}
-          </button>
-        );
-    },
-  });
-  async function save(e: React.FormEvent) {
-    e.preventDefault();
-    setError("");
-    const values = Object.fromEntries(
-      new FormData(form.current!).entries(),
-    ) as Record<string, string>;
-    for (const key of Object.keys(values)) values[key] = values[key].trim();
-    if (
-      ["title", "teacher", "name", "room", "reason"].some(
-        (key) => key in values && !values[key],
-      )
-    ) {
-      setError("Заполните обязательные поля");
-      return;
-    }
-    if (
-      modal === "conflict" &&
-      values.room === "204" &&
-      values.start < "18:45" &&
-      values.end > "17:15"
-    ) {
-      setError("Пересечение сохраняется: выберите другое время или кабинет");
-      return;
-    }
-    if (values.start && values.end && values.start >= values.end) {
-      setError("Окончание должно быть позже начала");
-      return;
-    }
-    if (modal === "payment" && Number(values.amount) <= 0) {
-      setError("Сумма должна быть положительной");
-      return;
-    }
-    setSaving(true);
-    await new Promise((r) => setTimeout(r, 150));
-    const ok = commit(
-      (d) => {
-        if (modal === "lesson") {
-          d.lessons.push({
-            ...structuredClone(initial.lessons[4]),
-            ...values,
-            id: crypto.randomUUID(),
-            marked: false,
-            status: "planned",
-            attendance: [],
-            count: 0,
-          });
-        } else if (modal === "attendance" && selected) {
-          const l = d.lessons.find((x) => x.id === selected.id)!;
-          l.attendance = l.attendance.map((s, i) => ({
-            ...s,
-            state: values["attendance" + i],
-          }));
-          l.marked = !l.attendance.some((s) => s.state === "Не отмечено");
-          if (l.marked && !d.resolved.includes("attendance"))
-            d.resolved.push("attendance");
-        } else if (["move", "cancel"].includes(modal) && selected) {
-          Object.assign(
-            d.lessons.find((x) => x.id === selected.id)!,
-            values,
-            modal === "cancel" ? { status: "cancelled" } : {},
-          );
-        } else if (modal === "payment") d.payments.push(values);
-        else if (modal === "student") {
-          d.students.push(values.name);
-          d.enrollments ??= [];
-          d.enrollments.push(values);
-          for (const lesson of d.lessons.filter(
-            (l) => l.title === values.group,
-          )) {
-            lesson.attendance.push({ name: values.name, state: "Не отмечено" });
-            lesson.count++;
-            lesson.marked = false;
-          }
-        } else if (modal === "group") {
-          d.groups.push(values.name);
-          d.groupDetails ??= [];
-          d.groupDetails.push(values);
-        } else if (modal === "draft") d.drafts.push(values);
-        else if (modal === "conflict" || modal === "substitute") {
-          d.incidents ??= {};
-          d.incidents[modal] = values;
-          d.resolved.push(modal);
-        }
-      },
-      modal === "draft"
-        ? "Локальный черновик сохранён. Отправка не выполнялась."
-        : `${titles[modal]} — сохранено`,
+    setMenu("");
+    requestAnimationFrame(() =>
+      document.querySelector<HTMLElement>("main h1")?.focus(),
     );
-    setSaving(false);
-    if (ok) finish();
   }
-  const field = (
-    name: string,
-    label: string,
-    type = "text",
-    value = "",
-    required = true,
-  ) => (
-    <label key={name}>
-      {label}
-      <input
-        name={name}
-        type={type}
-        defaultValue={value}
-        required={required}
-        min={type === "number" ? "0.01" : undefined}
-        step={type === "number" ? "0.01" : undefined}
+  async function run(command: Command, key?: string) {
+    try {
+      if (!session || !latest.current)
+        throw new ApiError(401, "Войдите повторно");
+      await api.command(
+        command,
+        latest.current.revision,
+        key || crypto.randomUUID(),
+        session.csrf,
+      );
+      await refresh();
+      notify(
+        command.type === "deliver"
+          ? "Тестовый адаптер принял запрос. Реальная отправка не выполнялась."
+          : "Сохранено на сервере",
+      );
+    } catch (e) {
+      if ((e as ApiError).status === 409) await refresh().catch(() => {});
+      if (key) throw e;
+      setError((e as Error).message);
+    }
+  }
+
+  useEffect(() => {
+    if (!menu) return;
+    const previous = document.activeElement as HTMLElement;
+    requestAnimationFrame(() =>
+      document.querySelector<HTMLElement>(".popover button")?.focus(),
+    );
+    return () => {
+      if (previous?.isConnected) previous.focus();
+    };
+  }, [menu]);
+  useEffect(() => {
+    if (!mobile) return;
+    requestAnimationFrame(() =>
+      document.querySelector<HTMLElement>(".sidebar nav a")?.focus(),
+    );
+    const trap = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+      const nodes = Array.from(
+        document.querySelectorAll<HTMLElement>(
+          ".sidebar a,.sidebar button,.sidebar select",
+        ),
+      );
+      const index = nodes.indexOf(document.activeElement as HTMLElement);
+      if (e.shiftKey && index === 0) {
+        e.preventDefault();
+        nodes.at(-1)?.focus();
+      } else if (!e.shiftKey && index === nodes.length - 1) {
+        e.preventDefault();
+        nodes[0]?.focus();
+      }
+    };
+    window.addEventListener("keydown", trap);
+    return () => {
+      window.removeEventListener("keydown", trap);
+      document.querySelector<HTMLElement>(".mobile-menu")?.focus();
+    };
+  }, [mobile]);
+  if (loading)
+    return (
+      <div className="loading" role="status">
+        Загрузка «ЁРШ»…
+      </div>
+    );
+  if (!session)
+    return (
+      <Login
+        demo={demo}
+        error={error}
+        onLogin={async (email, password) => {
+          const session = await api.login(email, password);
+          setSession(session);
+          const s = await refresh();
+          setDate(today(s.school.timezone));
+        }}
+        retry={() => void boot()}
       />
-    </label>
-  );
+    );
+  if (!data)
+    return (
+      <div className="loading">
+        <p role="alert">{error || "Данные пока не загружены"}</p>
+        <Button onClick={() => void refresh().catch(() => {})}>
+          Повторить загрузку
+        </Button>
+        <Button
+          onClick={() => {
+            void api.logout(session.csrf);
+            setSession(null);
+          }}
+        >
+          Выйти
+        </Button>
+      </div>
+    );
+  const s: State = branch
+    ? {
+        ...data,
+        lessons: data.lessons.filter((x) => x.branchId === branch),
+        rooms: data.rooms.filter((x) => x.branchId === branch),
+        groups: data.groups.filter((x) => x.branchId === branch),
+        teachers: data.teachers.filter((x) => x.branchId === branch),
+        students: data.students.filter((x) => x.branchId === branch),
+        enrollments: data.enrollments.filter((x) => x.branchId === branch),
+        attendance: data.attendance.filter((x) => x.branchId === branch),
+        tariffs: data.tariffs.filter((x) => x.branchId === branch),
+        subscriptions: data.subscriptions.filter((x) => x.branchId === branch),
+        payments: data.payments.filter((x) => x.branchId === branch),
+        charges: data.charges.filter((x) => x.branchId === branch),
+        debits: data.debits.filter((x) => x.branchId === branch),
+      }
+    : data;
+  const a = createActions(s, run, setSpec, session.csrf);
+  const ctx: Workspace = {
+    s,
+    user: session.user,
+    a,
+    run,
+    lesson: (id) => navigate("/lessons/" + encodeURIComponent(id)),
+    profile: (entity, id) =>
+      navigate("/" + entity + "/" + encodeURIComponent(id)),
+  };
+  const parts = path.split("/").filter(Boolean),
+    root = parts[0] || "dashboard";
+  const active = routes.find(([href]) => href === "/" + root);
+  const alerts = notifications(s);
+  const results = [
+    ...s.students.map((x) => ({
+      entity: "students" as const,
+      id: x.id,
+      name: x.name,
+      type: "Ученик",
+    })),
+    ...s.groups.map((x) => ({
+      entity: "groups" as const,
+      id: x.id,
+      name: x.name,
+      type: "Группа",
+    })),
+    ...s.teachers.map((x) => ({
+      entity: "teachers" as const,
+      id: x.id,
+      name: x.name,
+      type: "Преподаватель",
+    })),
+  ].filter((x) => x.name.toLowerCase().includes(query.toLowerCase()));
+  const financeAllowed = session.user.role !== "teacher";
+  const detail =
+    parts.length === 2 &&
+    ["students", "teachers", "groups", "lessons"].includes(root)
+      ? { entity: root, id: decodeURIComponent(parts[1]) }
+      : null;
   return (
-    <div className={mobile ? "app mobile-open" : "app"}>
+    <div className="crm">
       <button
-        className="mobile-toggle"
-        aria-label="Открыть навигацию"
+        className="mobile-menu icon-button"
+        aria-label={mobile ? "Закрыть навигацию" : "Открыть навигацию"}
+        aria-expanded={mobile}
+        aria-controls="sidebar"
         onClick={() => setMobile(!mobile)}
       >
-        {icon("menu")}
+        <Icon name="menu" />
       </button>
       {mobile && (
         <button
-          aria-label="Закрыть навигацию"
-          className="nav-backdrop"
+          className="scrim"
+          tabIndex={-1}
+          aria-label="Закрыть меню навигации"
           onClick={() => setMobile(false)}
         />
       )}
-      {parse(template, options())}
-
-      {pop && (
+      <aside id="sidebar" className={"sidebar " + (mobile ? "open" : "")}>
+        <div>
+          <div className="brand">
+            <span className="brand-mark">Ё</span>
+            <div>
+              <b>
+                ЁРШ <span className="badge">CRM</span>
+              </b>
+              <p>{s.school.name}</p>
+            </div>
+          </div>
+          <label className="campus">
+            <span className="dot green" />
+            <span className="sr-only">Филиал</span>
+            <select value={branch} onChange={(e) => setBranch(e.target.value)}>
+              <option value="">Все доступные филиалы</option>
+              {s.branches.map((b) => (
+                <option value={b.id} key={b.id}>
+                  {b.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <nav aria-label="Основная навигация">
+            {routes
+              .filter(
+                ([href]) =>
+                  financeAllowed ||
+                  !["/finance", "/analytics", "/settings"].includes(href),
+              )
+              .map(([href, title, icon]) => (
+                <a
+                  key={href}
+                  href={href}
+                  aria-current={active?.[0] === href ? "page" : undefined}
+                  className={active?.[0] === href ? "active" : ""}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    navigate(href);
+                  }}
+                >
+                  <Icon name={icon} />
+                  {title}
+                </a>
+              ))}
+          </nav>
+        </div>
+        <div className="sidebar-bottom">
+          <p>
+            <Icon name="book" />
+            {s.school.academicYear} уч. год
+          </p>
+          <Button onClick={() => setMenu(menu === "help" ? "" : "help")}>
+            Помощь и связь
+            <Icon name="chevron" />
+          </Button>
+        </div>
+      </aside>
+      <header className="topbar" inert={mobile || undefined}>
+        <div className="global-search">
+          <Icon name="search" />
+          <input
+            id="global-search"
+            role="combobox"
+            aria-autocomplete="list"
+            onKeyDown={(e) => {
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                document
+                  .querySelector<HTMLElement>("#search-results button")
+                  ?.focus();
+              }
+            }}
+            aria-label="Поиск ученика, группы или преподавателя"
+            aria-expanded={!!query}
+            aria-controls="search-results"
+            autoComplete="off"
+            placeholder="Поиск ученика, группы или преподавателя…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          <kbd>⌘K</kbd>
+          {query && (
+            <div
+              id="search-results"
+              className="search-results"
+              role="listbox"
+              aria-label="Результаты поиска"
+              onKeyDown={(e) => {
+                const nodes = Array.from(
+                  document.querySelectorAll<HTMLElement>(
+                    "#search-results button",
+                  ),
+                );
+                const i = nodes.indexOf(document.activeElement as HTMLElement);
+                if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                  e.preventDefault();
+                  nodes[
+                    (i + (e.key === "ArrowDown" ? 1 : -1) + nodes.length) %
+                      nodes.length
+                  ]?.focus();
+                }
+                if (e.key === "Escape") {
+                  setQuery("");
+                  document.getElementById("global-search")?.focus();
+                }
+              }}
+            >
+              {results.slice(0, 8).map((x) => (
+                <button
+                  role="option"
+                  aria-selected={false}
+                  key={x.entity + x.id}
+                  onClick={() => ctx.profile(x.entity, x.id)}
+                >
+                  <small>{x.type}</small>
+                  {x.name}
+                </button>
+              ))}
+              {!results.length && <Empty>Ничего не найдено</Empty>}
+              {results.length > 8 && (
+                <button
+                  role="option"
+                  aria-selected={false}
+                  onClick={() => {
+                    navigate("/search");
+                    setQuery(query);
+                  }}
+                >
+                  Все результаты ({results.length})
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+        {allowed(session.user, "lesson") && (
+          <Button
+            primary
+            aria-label="Создать"
+            aria-expanded={menu === "create"}
+            aria-controls="create-menu"
+            onClick={() => setMenu(menu === "create" ? "" : "create")}
+          >
+            <Icon name="plus" />
+            <span>Создать</span>
+          </Button>
+        )}
+        <div className="top-date">
+          <Icon name="calendar" />
+          <span>
+            Сегодня,
+            <br />
+            {new Date(today(s.school.timezone) + "T12:00Z").toLocaleDateString(
+              "ru-RU",
+              { day: "numeric", month: "short" },
+            )}
+          </span>
+          <span>
+            {metrics(s, today(s.school.timezone)).total}
+            <br />
+            занятий
+          </span>
+        </div>
+        <Button
+          aria-label={"Уведомления: " + alerts.length}
+          aria-expanded={menu === "notifications"}
+          aria-controls="notifications-menu"
+          onClick={() =>
+            setMenu(menu === "notifications" ? "" : "notifications")
+          }
+        >
+          <Icon name="bell" />
+          {alerts.length > 0 && (
+            <span className="counter">{alerts.length}</span>
+          )}
+        </Button>
+        <button
+          className="profile-button"
+          aria-expanded={menu === "profile"}
+          aria-controls="profile-menu"
+          onClick={() => setMenu(menu === "profile" ? "" : "profile")}
+        >
+          <span className="avatar">Ё</span>
+          <span>
+            {session.user.name}
+            <small>{roleNames[session.user.role]}</small>
+          </span>
+        </button>
+      </header>
+      <main className="workspace" inert={mobile || undefined}>
+        {s.demo && (
+          <div className="demo-banner">
+            ДЕМОРЕЖИМ · Отдельная тестовая база на сервере. Реальные платежи и
+            сообщения не отправляются.
+          </div>
+        )}
+        {error && (
+          <div className="error" role="alert">
+            {error}{" "}
+            <Button onClick={() => void refresh().catch(() => {})}>
+              Повторить / обновить
+            </Button>
+          </div>
+        )}
+        {parts.length > 2 || (parts.length === 2 && !detail) || (!active && root !== "search") ? (
+          <section className="panel">
+            <h1 tabIndex={-1}>404 — Страница не найдена</h1>
+            <p>Проверьте адрес страницы.</p>
+            <Button onClick={() => navigate("/dashboard")}>На главную</Button>
+          </section>
+        ) : !financeAllowed &&
+          ["finance", "analytics", "settings"].includes(root) ? (
+          <section className="panel">
+            <h1 tabIndex={-1}>Доступ ограничен</h1>
+            <p>Раздел доступен другой роли. Полномочия проверяются сервером.</p>
+          </section>
+        ) : root === "dashboard" ? (
+          <Dashboard {...ctx} date={date} setDate={setDate} />
+        ) : root === "schedule" ? (
+          <Schedule {...ctx} date={date} setDate={setDate} />
+        ) : root === "lessons" ? (
+          <LessonRegistry {...ctx} />
+        ) : ["students", "groups", "teachers"].includes(root) ? (
+          <Registry key={root} entity={root as "students"} ctx={ctx} />
+        ) : root === "finance" ? (
+          <Finance {...ctx} />
+        ) : root === "analytics" ? (
+          <Analytics {...ctx} />
+        ) : root === "settings" ? (
+          <Settings {...ctx} />
+        ) : (
+          <section className="panel">
+            <h1 tabIndex={-1}>Результаты поиска</h1>
+            {results.map((x) => (
+              <p key={x.entity + x.id}>
+                <button
+                  className="text-link"
+                  onClick={() => ctx.profile(x.entity, x.id)}
+                >
+                  {x.type}: {x.name}
+                </button>
+              </p>
+            ))}
+          </section>
+        )}
+      </main>
+      {menu && (
         <>
           <button
-            className="popover-backdrop"
-            aria-label="Закрыть меню"
-            onClick={() => setPop("")}
+            className="popover-scrim"
+            aria-label="Закрыть всплывающее меню"
+            onClick={() => setMenu("")}
           />
-          <div className={"popover " + pop}>
-            {pop === "create" ? (
-              ["lesson", "student", "group", "payment"].map((k) => (
-                <button key={k} onClick={() => open(k)}>
-                  {titles[k]}
-                </button>
-              ))
-            ) : pop === "notifications" ? (
+          <div className={"popover " + menu} id={menu + "-menu"}>
+            {menu === "create" ? (
               <>
-                <b>Уведомления</b>
-                {notifications.map((n) => (
+                {allowed(session.user, "lesson") && (
                   <button
-                    key={n.id}
-                    onClick={() =>
-                      open(
-                        n.action,
-                        data.lessons.find((l) => l.id === n.lessonId) || null,
-                      )
-                    }
+                    onClick={() => {
+                      setMenu("");
+                      a.lesson();
+                    }}
                   >
-                    {n.title}
+                    Добавить занятие
                   </button>
-                ))}
+                )}
+                {allowed(session.user, "save", "students") && (
+                  <button
+                    onClick={() => {
+                      setMenu("");
+                      a.edit("students");
+                    }}
+                  >
+                    Добавить ученика
+                  </button>
+                )}
+                {allowed(session.user, "save", "groups") && (
+                  <button
+                    onClick={() => {
+                      setMenu("");
+                      a.edit("groups");
+                    }}
+                  >
+                    Создать группу
+                  </button>
+                )}
+                {allowed(session.user, "payment") && (
+                  <button
+                    onClick={() => {
+                      setMenu("");
+                      a.payment();
+                    }}
+                  >
+                    Принять оплату
+                  </button>
+                )}
+              </>
+            ) : menu === "profile" ? (
+              <>
+                <h3>{session.user.name}</h3>
+                <p>{roleNames[session.user.role]}</p>
+                <p>
+                  Сессия до{" "}
+                  {new Date(session.expiresAt).toLocaleTimeString("ru-RU", {
+                    timeZone: s.school.timezone,
+                  })}
+                </p>
+                <Button
+                  onClick={() => {
+                    void api
+                      .logout(session.csrf)
+                      .then(() => {
+                        setSession(null);
+                        setData(null);
+                        setMenu("");
+                        notify("Вы вышли из системы");
+                      })
+                      .catch((e) => setError(e.message));
+                  }}
+                >
+                  Выйти
+                </Button>
+              </>
+            ) : menu === "notifications" ? (
+              <>
+                <h3>Уведомления ({alerts.length})</h3>
+                {alerts.length ? (
+                  alerts.map((x) => (
+                    <button
+                      key={x.id}
+                      onClick={() => {
+                        setMenu("");
+                        void run({
+                          type: "read-notification",
+                          notificationId: x.id,
+                        });
+                        if (x.lessonId) ctx.lesson(x.lessonId);
+                        else if (x.studentId)
+                          ctx.profile("students", x.studentId);
+                      }}
+                    >
+                      {x.title}
+                      {s.notificationReads.some(
+                        (r) => r.notificationId === x.id,
+                      ) && <small>Прочитано</small>}
+                    </button>
+                  ))
+                ) : (
+                  <Empty>Нет нерешённых уведомлений</Empty>
+                )}
               </>
             ) : (
               <>
-                <b>Ольга Смирнова</b>
-                <p>Старший администратор</p>
-                <button onClick={() => open("profile")}>Данные профиля</button>
+                <h3>Помощь</h3>
+                <p>
+                  Данные хранятся на сервере. Правила учёта, резервирования и
+                  запуска описаны в README и docs/business-rules.md.
+                </p>
+                <p>
+                  Поддержка: обратитесь к директору школы. Внешний канал
+                  поддержки не подключён.
+                </p>
               </>
             )}
           </div>
         </>
       )}
-      {modal && (
-        <dialog
-          ref={dialog}
-          aria-labelledby="dialog-title"
-          className={["details", "attendance"].includes(modal) ? "drawer" : ""}
-          onCancel={(e) => {
-            e.preventDefault();
-            close();
-          }}
+      {detail && !spec && (
+        <Drawer
+          key={detail.entity + detail.id}
+          title={detail.entity === "lessons" ? "Занятие и журнал" : "Карточка"}
+          onClose={() => navigate("/" + detail.entity)}
         >
-          <div className="dialog-heading">
-            <h2 id="dialog-title">{titles[modal]}</h2>
-            <button aria-label="Закрыть" onClick={close}>
-              {icon("close")}
-            </button>
-          </div>
-          {discard ? (
-            <div>
-              <p>Закрыть без сохранения изменений?</p>
-              <div className="form-actions">
-                <button onClick={() => setDiscard(false)}>
-                  Продолжить редактирование
-                </button>
-                <button className="danger" onClick={finish}>
-                  Не сохранять
-                </button>
-              </div>
-            </div>
+          {detail.entity === "lessons" ? (
+            s.lessons.find((l) => l.id === detail.id) ? (
+              <LessonDetails
+                l={s.lessons.find((l) => l.id === detail.id)!}
+                ctx={ctx}
+              />
+            ) : (
+              <Empty>Занятие не найдено или недоступно</Empty>
+            )
           ) : (
-            <form ref={form} onSubmit={save} onChange={() => setDirty(true)}>
-              {modal === "details" ? (
-                <>
-                  <h3>{selected?.title || record || "Результат поиска"}</h3>
-                  {selected ? (
-                    <>
-                      <p>
-                        {selected.date} • {selected.start}–{selected.end}
-                      </p>
-                      <p>
-                        {selected.teacher} • {selected.room}
-                      </p>
-                      <p>
-                        {selected.status === "cancelled"
-                          ? "Отменено: " + selected.reason
-                          : selected.marked
-                            ? "Явка отмечена"
-                            : "Явка не отмечена"}
-                      </p>
-                      <div className="detail-actions">
-                        <button
-                          type="button"
-                          onClick={() => open("attendance", selected)}
-                        >
-                          Отметить посещаемость
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => open("move", selected)}
-                        >
-                          Перенести
-                        </button>
-                        <button
-                          type="button"
-                          className="danger"
-                          onClick={() => open("cancel", selected)}
-                        >
-                          Отменить занятие
-                        </button>
-                      </div>
-                    </>
-                  ) : (
-                    <p>
-                      Демонстрационная запись найдена. Подробный макет раздела
-                      не предоставлен.
-                    </p>
-                  )}
-                </>
-              ) : null}
-              {modal === "attendance" && (
-                <>
-                  <h3>{selected?.title}</h3>
-                  {selected?.attendance.length ? (
-                    selected.attendance.map((s, i) => (
-                      <label className="attendance-row" key={s.name}>
-                        {s.name}
-                        <select name={"attendance" + i} defaultValue={s.state}>
-                          {["Присутствует", "Отсутствует", "Не отмечено"].map(
-                            (v) => (
-                              <option key={v}>{v}</option>
-                            ),
-                          )}
-                        </select>
-                      </label>
-                    ))
-                  ) : (
-                    <p>В занятие пока не записаны ученики.</p>
-                  )}
-                </>
-              )}
-              {modal === "lesson" && (
-                <>
-                  {field("title", "Название или группа / ученик")}
-                  {field("teacher", "Преподаватель")}
-                  {field("date", "Дата", "date", day)}
-                  <div className="form-grid">
-                    {field("start", "Начало", "time")}
-                    {field("end", "Окончание", "time")}
-                  </div>
-                  {field("room", "Кабинет")}
-                </>
-              )}
-              {modal === "move" && (
-                <>
-                  {field("date", "Дата", "date", selected?.date)}
-                  {field("start", "Начало", "time", selected?.start)}
-                  {field("end", "Окончание", "time", selected?.end)}
-                  {field("room", "Кабинет", "text", selected?.room)}
-                </>
-              )}
-              {modal === "cancel" && field("reason", "Причина отмены")}
-              {modal === "payment" && (
-                <>
-                  <label>
-                    Ученик
-                    <select required name="student">
-                      {data.students.map((s) => (
-                        <option key={s}>{s}</option>
-                      ))}
-                    </select>
-                  </label>
-                  {field("amount", "Сумма, ₽", "number")}
-                  {field("date", "Дата", "date", day)}
-                  <label>
-                    Способ оплаты
-                    <select name="method">
-                      <option>Банковская карта</option>
-                      <option>Наличные</option>
-                      <option>Перевод</option>
-                    </select>
-                  </label>
-                  {field("comment", "Комментарий", "text", "", false)}
-                </>
-              )}
-              {["student", "group"].includes(modal) && (
-                <>
-                  {field(
-                    "name",
-                    modal === "student" ? "Фамилия и имя" : "Название группы",
-                  )}
-                  {modal === "student" ? (
-                    <label>
-                      Группа
-                      <select name="group">
-                        {data.groups.map((g) => (
-                          <option key={g}>{g}</option>
-                        ))}
-                      </select>
-                    </label>
-                  ) : (
-                    field("teacher", "Преподаватель")
-                  )}
-                </>
-              )}
-              {modal === "conflict" && (
-                <>
-                  <p>Ауд. 204, 18 октября, 17:15–18:45</p>
-                  <p>
-                    Робототехника • Дмитрий Соколов
-                    <br />
-                    Авиамоделирование • Михаил Кузнецов
-                  </p>
-                  <p>Изменить занятие «Авиамоделирование»:</p>
-                  {field(
-                    "start",
-                    "Начало",
-                    "time",
-                    data.incidents?.conflict?.start || "17:15",
-                  )}
-                  {field(
-                    "end",
-                    "Окончание",
-                    "time",
-                    data.incidents?.conflict?.end || "18:45",
-                  )}
-                  {field(
-                    "room",
-                    "Кабинет",
-                    "text",
-                    data.incidents?.conflict?.room || "204",
-                  )}
-                  {data.resolved.includes("conflict") && (
-                    <p>Локальное изменение уже сохранено.</p>
-                  )}
-                </>
-              )}
-              {modal === "draft" && (
-                <>
-                  <p>Ковалев Максим • 2 занятия в долг</p>
-                  <p>
-                    Сохранится только локальный черновик, без отправки и
-                    создания счёта.
-                  </p>
-                  <label>
-                    Тип
-                    <select name="kind">
-                      <option>Напоминание</option>
-                      <option>Черновик счёта</option>
-                    </select>
-                  </label>
-                  <label>
-                    Текст
-                    <textarea
-                      required
-                      name="text"
-                      defaultValue="Просим уточнить оплату занятий."
-                    />
-                  </label>
-                </>
-              )}
-              {modal === "substitute" && (
-                <>
-                  <p>Биология 10 кл. • Кузнецов М. заболел</p>
-                  <label>
-                    Новый преподаватель
-                    <select
-                      name="teacher"
-                      defaultValue={data.incidents?.substitute?.teacher}
-                    >
-                      {data.lessons
-                        .filter((l) => l.teacher !== "Михаил Кузнецов")
-                        .map((l) => (
-                          <option key={l.id}>{l.teacher}</option>
-                        ))}
-                    </select>
-                  </label>
-                  <p>Замена сохраняется локально для указанного занятия.</p>
-                </>
-              )}
-              {modal === "help" && (
-                <p>
-                  Демонстрация «ЁРШ CRM». Данные сохраняются в этом браузере.
-                  Инструкция по сбросу находится в README.md.
-                </p>
-              )}
-              {modal === "profile" && (
-                <>
-                  <p>Ольга Смирнова</p>
-                  <p>Старший администратор • Школа «Вектор»</p>
-                </>
-              )}
-              {error && (
-                <p role="alert" className="error">
-                  {error}
-                </p>
-              )}
-              {!["details", "help", "profile"].includes(modal) && (
-                <div className="form-actions">
-                  <button type="button" onClick={close}>
-                    Отмена
-                  </button>
-                  <button className="primary" disabled={saving}>
-                    {saving ? "Сохранение…" : "Сохранить"}
-                  </button>
-                </div>
-              )}
-            </form>
+            <Profile
+              entity={detail.entity as "students"}
+              id={detail.id}
+              ctx={ctx}
+            />
           )}
-        </dialog>
+        </Drawer>
       )}
-      <Toast message={toast} />
+      {spec && <Modal spec={spec} onClose={() => setSpec(null)} />}
+      {toast && (
+        <div role="status" className="toast">
+          {toast}
+        </div>
+      )}
     </div>
   );
 }
-createRoot(document.getElementById("root")!).render(<App />);
+function Login({
+  demo,
+  error,
+  onLogin,
+  retry,
+}: {
+  demo: boolean;
+  error: string;
+  onLogin: (email: string, password: string) => Promise<void>;
+  retry: () => void;
+}) {
+  const [email, setEmail] = useState(""),
+    [password, setPassword] = useState(""),
+    [saving, setSaving] = useState(false),
+    [message, setMessage] = useState("");
+  return (
+    <main className="login-page">
+      <section className="login-card panel">
+        <div className="brand">
+          <span className="brand-mark">Ё</span>
+          <div>
+            <b>ЁРШ CRM</b>
+            <p>Вход в систему школы</p>
+          </div>
+        </div>
+        {demo && (
+          <div className="demo-banner">
+            <b>Демонстрационная среда</b>
+            <p>
+              Только тестовые данные. Для входа: director@demo.local,
+              admin@demo.local, teacher@demo.local или finance@demo.local.
+              Пароль: Demo-School-2026!
+            </p>
+          </div>
+        )}
+        <form
+          onSubmit={async (e) => {
+            e.preventDefault();
+            setSaving(true);
+            setMessage("");
+            try {
+              await onLogin(email, password);
+            } catch (e) {
+              setMessage((e as Error).message);
+            } finally {
+              setSaving(false);
+            }
+          }}
+        >
+          <label>
+            Email
+            <input
+              name="email"
+              type="email"
+              autoComplete="username"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+          </label>
+          <label>
+            Пароль
+            <input
+              name="password"
+              type="password"
+              autoComplete="current-password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </label>
+          {(message || error) && (
+            <p role="alert" className="error">
+              {message || error}
+            </p>
+          )}
+          <button className="btn primary" disabled={saving}>
+            {saving ? "Вход…" : "Войти"}
+          </button>
+        </form>
+        {error && <Button onClick={retry}>Повторить подключение</Button>}
+        <small>
+          Пароль рабочего аккаунта выдаёт администратор сервера. Сброс сессии не
+          удаляет данные школы.
+        </small>
+      </section>
+    </main>
+  );
+}
+class ErrorBoundary extends React.Component<
+  { children: ReactNode },
+  { error: boolean; id: string }
+> {
+  state = { error: false, id: "" };
+  static getDerivedStateFromError() {
+    return { error: true, id: crypto.randomUUID() };
+  }
+  render() {
+    return this.state.error ? (
+      <main className="loading">
+        <h1>Не удалось отобразить экран</h1>
+        <p>Данные на сервере сохранены. Диагностический код: {this.state.id}</p>
+        <Button onClick={() => location.reload()}>
+          Перезагрузить интерфейс
+        </Button>
+      </main>
+    ) : (
+      this.props.children
+    );
+  }
+}
+createRoot(document.getElementById("root")!).render(
+  <ErrorBoundary>
+    <App />
+  </ErrorBoundary>,
+);

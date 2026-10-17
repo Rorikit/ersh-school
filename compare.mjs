@@ -1,2 +1,2 @@
-import {chromium} from '@playwright/test';import fs from 'node:fs';
-const b=await chromium.launch();const p=await b.newPage({viewport:{width:1469,height:840}});await p.setContent(`<html lang="ru"><body style="margin:0;font:14px Arial;display:flex;background:#e5eeff"><section style="width:50%"><p>Эталон Stitch</p><img style="width:100%" src="data:image/png;base64,${fs.readFileSync('screen.png').toString('base64')}"/></section><section style="width:50%"><p>Реализация React</p><img style="width:100%" src="data:image/png;base64,${fs.readFileSync('artifacts/actual.png').toString('base64')}"/></section></body></html>`);await p.screenshot({path:'artifacts/comparison.png',fullPage:true});await b.close();
+import {spawn} from 'node:child_process';
+const child=spawn(process.execPath,['node_modules/@playwright/test/cli.js','test','-g','Визуальная регрессия'],{stdio:'inherit'});child.on('exit',code=>{process.exitCode=code??1});
